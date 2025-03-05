@@ -1,1 +1,0 @@
-scp -r . pi@<IP-адреса>:/home/pi/your_project

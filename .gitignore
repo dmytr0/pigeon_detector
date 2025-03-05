@@ -5,3 +5,4 @@ data
 #pigeon/models/*.txt
 #pigeon/models/*.tflite
 Dockerfile
+deploy.sh
