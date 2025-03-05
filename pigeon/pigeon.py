@@ -1,103 +1,139 @@
+#!/usr/bin/env python3
 import cv2
 import numpy as np
-import time
 from tflite_runtime.interpreter import Interpreter
 
-# Шляхи до моделі та файлу з мітками (labels)
-MODEL_PATH = 'pigeon.tflite'
-LABELS_PATH = 'labels.txt'
+# Шляхи до файлів моделей та лейблів
+DETECTION_MODEL = 'ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite'
+DETECTION_LABELS = 'coco_labels.txt'
+CLASSIFIER_MODEL = 'mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite'
+CLASSIFIER_LABELS = 'inat_bird_labels.txt'
 
-
-# Функція для завантаження міток із файлу
 def load_labels(path):
     labels = {}
     with open(path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                # Припускаємо, що формат: id label
-                pair = line.strip().split(maxsplit=1)
-                if len(pair) == 2:
-                    labels[int(pair[0])] = pair[1]
+        for i, line in enumerate(f):
+            line = line.strip()
+            if line:
+                parts = line.split(maxsplit=1)
+                if len(parts) == 2 and parts[0].isdigit():
+                    labels[int(parts[0])] = parts[1]
+                else:
+                    labels[i] = line
     return labels
 
+# Завантаження лейблів
+det_labels = load_labels(DETECTION_LABELS)
+cls_labels = load_labels(CLASSIFIER_LABELS)
 
-labels = load_labels(LABELS_PATH)
+# Цільові лейбли для голубів (переводимо в нижній регістр для порівняння)
+target_pigeon_labels = ['columba livia domestica', 'columba livia']
 
-# Ініціалізація TFLite-інтерпретатора для роботи на CPU
-interpreter = Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
+def init_interpreter(model_path):
+    interpreter = Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+    return interpreter
 
-# Отримання деталей моделі (інформація про вхід та вихід)
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+def main():
+    # Ініціалізація інтерпретаторів для детекції та класифікації
+    det_interpreter = init_interpreter(DETECTION_MODEL)
+    cls_interpreter = init_interpreter(CLASSIFIER_MODEL)
 
-# Припускаємо, що модель приймає зображення розміром, наприклад, (300, 300)
-input_shape = input_details[0]['shape']
-height = input_shape[1]
-width = input_shape[2]
+    # Отримання деталей для моделі детекції
+    det_input_details = det_interpreter.get_input_details()
+    det_output_details = det_interpreter.get_output_details()
+    det_height = det_input_details[0]['shape'][1]
+    det_width = det_input_details[0]['shape'][2]
 
-# Поріг впевненості для відображення детекції
-CONF_THRESHOLD = 0.5
+    # Отримання деталей для моделі класифікації
+    cls_input_details = cls_interpreter.get_input_details()
+    cls_output_details = cls_interpreter.get_output_details()
+    cls_height = cls_input_details[0]['shape'][1]
+    cls_width = cls_input_details[0]['shape'][2]
 
-# Ініціалізація камери (зверніть увагу, що для Pi Camera можна використати бібліотеку picamera)
-cap = cv2.VideoCapture(0)
+    # Відкриття камери (0 – стандартний інтерфейс камери)
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Не вдалося відкрити камеру")
+        return
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("Не вдалося отримати кадр з камери")
-        break
+    print("Запуск розпізнавання. Натисніть 'q' для виходу.")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Не вдалося зчитати кадр")
+            break
 
-    # Збереження копії кадру для відображення
-    output_frame = frame.copy()
+        # Зміна розміру кадру для детекції
+        det_frame = cv2.resize(frame, (det_width, det_height))
+        # Підготовка вхідних даних (для моделей EdgeTPU зазвичай використовують uint8)
+        if det_input_details[0]['dtype'] == np.uint8:
+            input_det = np.expand_dims(det_frame, axis=0).astype(np.uint8)
+        else:
+            input_det = np.expand_dims(det_frame, axis=0).astype(np.float32) / 255.0
 
-    # Зміна розміру кадру до розміру, який приймає модель
-    resized_frame = cv2.resize(frame, (width, height))
+        # Запуск детекції
+        det_interpreter.set_tensor(det_input_details[0]['index'], input_det)
+        det_interpreter.invoke()
 
-    # Передобробка: розширення розмірності та нормалізація (якщо модель тренувалася з нормалізованими пікселями)
-    input_data = np.expand_dims(resized_frame, axis=0).astype(np.float32)
-    input_data = input_data / 255.0  # нормалізація до [0, 1]
+        # Отримання результатів детекції
+        boxes = det_interpreter.get_tensor(det_output_details[0]['index'])[0]      # [N, 4]
+        classes = det_interpreter.get_tensor(det_output_details[1]['index'])[0]    # [N]
+        scores = det_interpreter.get_tensor(det_output_details[2]['index'])[0]     # [N]
 
-    # Запуск інференсу
-    interpreter.set_tensor(input_details[0]['index'], input_data)
-    interpreter.invoke()
+        imH, imW, _ = frame.shape
 
-    # Отримання результатів:
-    # Зазвичай об'єктні детектори повертають:
-    #   boxes: координати прямокутників (ymin, xmin, ymax, xmax) – нормалізовані значення
-    #   classes: id класів
-    #   scores: значення впевненості
-    boxes = interpreter.get_tensor(output_details[0]['index'])[0]  # [num_detections, 4]
-    classes = interpreter.get_tensor(output_details[1]['index'])[0]  # [num_detections]
-    scores = interpreter.get_tensor(output_details[2]['index'])[0]  # [num_detections]
-
-    imH, imW, _ = frame.shape
-
-    # Обробка кожної детекції
-    for i in range(len(scores)):
-        if scores[i] >= CONF_THRESHOLD:
-            # Якщо у вашій моделі для голуба використовується певний id (наприклад, 0 або 1), можна перевірити:
+        for i in range(len(scores)):
+            if scores[i] < 0.5:
+                continue
             class_id = int(classes[i])
-            label = labels.get(class_id, 'Pigeon')
-            # Якщо модель тренувалась лише на голубах, ця перевірка може бути не обов’язковою.
-            # Отримання координат прямокутника
+            label = det_labels.get(class_id, '').lower()
+            # Розглядаємо лише об'єкти, що містять слово "bird"
+            if 'bird' not in label:
+                continue
+
+            # Перетворення координат
             ymin, xmin, ymax, xmax = boxes[i]
             x1 = int(xmin * imW)
             y1 = int(ymin * imH)
             x2 = int(xmax * imW)
             y2 = int(ymax * imH)
 
-            # Малювання прямокутника та напису з міткою і впевненістю
-            cv2.rectangle(output_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(output_frame, f'{label} {scores[i]:.2f}', (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Вирізання області для класифікації
+            roi = frame[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            roi_resized = cv2.resize(roi, (cls_width, cls_height))
+            if cls_input_details[0]['dtype'] == np.uint8:
+                input_cls = np.expand_dims(roi_resized, axis=0).astype(np.uint8)
+            else:
+                input_cls = np.expand_dims(roi_resized, axis=0).astype(np.float32) / 255.0
 
-    # Відображення кадру з результатами
-    cv2.imshow('Розпізнавання голубів', output_frame)
+            cls_interpreter.set_tensor(cls_input_details[0]['index'], input_cls)
+            cls_interpreter.invoke()
+            cls_output = cls_interpreter.get_tensor(cls_output_details[0]['index'])[0]
+            predicted_index = np.argmax(cls_output)
+            predicted_confidence = cls_output[predicted_index]
+            predicted_label = cls_labels.get(predicted_index, '').lower()
 
-    # Вихід з циклу при натисканні 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+            # Якщо класифікатор визначив голуба
+            if predicted_confidence > 0.5 and any(pigeon in predicted_label for pigeon in target_pigeon_labels):
+                color = (0, 255, 0)  # зелений
+                text = f"Pigeon {predicted_confidence:.2f}"
+            else:
+                color = (0, 0, 255)  # червоний
+                text = f"Not Pigeon {predicted_label[:15]} {predicted_confidence:.2f}"
 
-cap.release()
-cv2.destroyAllWindows()
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, text, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        cv2.imshow("Pigeon Detection", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == '__main__':
+    main()
