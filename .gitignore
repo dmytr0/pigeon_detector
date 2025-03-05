@@ -2,6 +2,6 @@
 .vscode
 **__pycache__
 data
-pigeon/models/*.txt
-pigeon/models/*.tflite
+#pigeon/models/*.txt
+#pigeon/models/*.tflite
 Dockerfile
