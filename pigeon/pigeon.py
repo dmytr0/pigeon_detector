@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
+import os
 import cv2
 import numpy as np
 from tflite_runtime.interpreter import Interpreter
 
-# Шляхи до файлів моделей та лейблів
-DETECTION_MODEL = 'ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite'
-DETECTION_LABELS = 'coco_labels.txt'
-CLASSIFIER_MODEL = 'mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite'
-CLASSIFIER_LABELS = 'inat_bird_labels.txt'
+# Визначаємо базовий каталог (де знаходиться цей скрипт)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Каталог з моделями та лейблами
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+
+# Шляхи до файлів моделей і лейблів у каталозі models
+DETECTION_MODEL = os.path.join(MODELS_DIR, 'ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite')
+DETECTION_LABELS = os.path.join(MODELS_DIR, 'coco_labels.txt')
+CLASSIFIER_MODEL = os.path.join(MODELS_DIR, 'mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite')
+CLASSIFIER_LABELS = os.path.join(MODELS_DIR, 'inat_bird_labels.txt')
 
 def load_labels(path):
     labels = {}
@@ -26,7 +32,7 @@ def load_labels(path):
 det_labels = load_labels(DETECTION_LABELS)
 cls_labels = load_labels(CLASSIFIER_LABELS)
 
-# Цільові лейбли для голубів (переводимо в нижній регістр для порівняння)
+# Цільові лейбли для голубів (порівняння ведеться в нижньому регістрі)
 target_pigeon_labels = ['columba livia domestica', 'columba livia']
 
 def init_interpreter(model_path):
@@ -39,19 +45,19 @@ def main():
     det_interpreter = init_interpreter(DETECTION_MODEL)
     cls_interpreter = init_interpreter(CLASSIFIER_MODEL)
 
-    # Отримання деталей для моделі детекції
+    # Деталі для моделі детекції
     det_input_details = det_interpreter.get_input_details()
     det_output_details = det_interpreter.get_output_details()
     det_height = det_input_details[0]['shape'][1]
     det_width = det_input_details[0]['shape'][2]
 
-    # Отримання деталей для моделі класифікації
+    # Деталі для моделі класифікації
     cls_input_details = cls_interpreter.get_input_details()
     cls_output_details = cls_interpreter.get_output_details()
     cls_height = cls_input_details[0]['shape'][1]
     cls_width = cls_input_details[0]['shape'][2]
 
-    # Відкриття камери (0 – стандартний інтерфейс камери)
+    # Відкриття камери
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Не вдалося відкрити камеру")
@@ -64,9 +70,8 @@ def main():
             print("Не вдалося зчитати кадр")
             break
 
-        # Зміна розміру кадру для детекції
+        # Підготовка зображення для детекції
         det_frame = cv2.resize(frame, (det_width, det_height))
-        # Підготовка вхідних даних (для моделей EdgeTPU зазвичай використовують uint8)
         if det_input_details[0]['dtype'] == np.uint8:
             input_det = np.expand_dims(det_frame, axis=0).astype(np.uint8)
         else:
@@ -116,12 +121,11 @@ def main():
             predicted_confidence = cls_output[predicted_index]
             predicted_label = cls_labels.get(predicted_index, '').lower()
 
-            # Якщо класифікатор визначив голуба
             if predicted_confidence > 0.5 and any(pigeon in predicted_label for pigeon in target_pigeon_labels):
-                color = (0, 255, 0)  # зелений
+                color = (0, 255, 0)  # зелений для голуба
                 text = f"Pigeon {predicted_confidence:.2f}"
             else:
-                color = (0, 0, 255)  # червоний
+                color = (0, 0, 255)  # червоний для інших
                 text = f"Not Pigeon {predicted_label[:15]} {predicted_confidence:.2f}"
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
